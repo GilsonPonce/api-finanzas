@@ -1,6 +1,6 @@
 # Arquitectura de Datos y Especificación de API REST para Finanzas Personales
 
-Este documento define el modelo de datos relacional y las especificaciones de la API REST JSON para la gestión de finanzas personales basada en el principio de contabilidad por partida doble (Debe y Haber).
+Este documento define el modelo de datos relacional, las especificaciones de la API REST JSON, las consideraciones técnicas de diseño y la hoja de ruta de futuras mejoras para un sistema de finanzas personales basado en el principio de contabilidad por partida doble (Debe y Haber).
 
 ---
 
@@ -40,7 +40,7 @@ Representa los lugares físicos o virtuales donde reside el dinero (Activos y Pa
 | `name` | `VARCHAR(100)` | Not Null | Nombre asignado (ej. "Banco Principal", "Efectivo"). |
 | `type` | `VARCHAR(20)` | Enum: `checking`, `savings`, `credit_card`, `cash`, `investment` | Naturaleza de la cuenta. |
 | `initial_balance` | `DECIMAL(12,2)` | Default: `0.00` | Saldo inicial registrado. |
-| `current_balance` | `DECIMAL(12,2)` | Default: `0.00` | Saldo calculado en tiempo real. |
+| `current_balance` | `DECIMAL(12,2)` | Default: `0.00` | Saldo calculated en tiempo real. |
 | `is_active` | `BOOLEAN` | Default: `TRUE` | Estado de la cuenta. |
 | `created_at` | `TIMESTAMPTZ` | Default: `NOW()` | Fecha de creación. |
 
@@ -228,3 +228,63 @@ Movilidad de fondos entre cuentas del propio usuario sin afectar ingresos o gast
   }
 }
 ```
+
+---
+
+## 3. Consideraciones Técnicas, Notas y Diseño de Arquitectura
+
+### A. Manejo de Precisión Financiera
+* **Evitar flotantes en almacenamiento y cómputo:** Nunca almacenes ni proceses dinero usando `FLOAT` o `DOUBLE` debido al error de redondeo IEEE 754.
+* **Tipos de datos sugeridos:**
+  * En SQL: Usar `DECIMAL(12,2)` o `NUMERIC(12,2)`.
+  * En código Backend: Usar tipos específicos de precisión como `Decimal` en Python/C#, `BigDecimal` en Java, o almacenar **centavos como enteros** (`$10.50` -> `1050`) en motores NoSQL o estructuras JSON.
+
+### B. Consistencia e Integridad Transaccional (ACID)
+* **Transacciones de Base de Datos:** Las operaciones que alteran el saldo de las cuentas (creación/modificación de transacciones o transferencias) deben envolverse estrictamente en un bloque de transacción SQL (`BEGIN TRANSACTION ... COMMIT`).
+* **Actualización del saldo actual (`current_balance`):**
+  * Para evitar condiciones de carrera (*race conditions*) en ejecuciones concurrentes, utiliza bloqueos pesimistas (`SELECT ... FOR UPDATE`) o recalculado por agregación mediante triggers/jobs en background.
+* **Aislamiento en Transferencias:** Un registro en la tabla `transfers` representa una operación atómica donde se debita de `from_account_id` y se acredita en `to_account_id`. Ambas actualizaciones deben ser exitosas o revertirse completamente (*Rollback*).
+
+### C. Estrategia de Indexación y Rendimiento
+Para garantizar consultas rápidas en filtros por rango de fechas y cuentas:
+* **Índices Compuestos sugeridos:**
+  * `CREATE INDEX idx_transactions_user_date ON transactions (user_id, date DESC);`
+  * `CREATE INDEX idx_transactions_account ON transactions (account_id, date DESC);`
+  * `CREATE INDEX idx_transfers_from_to ON transfers (user_id, from_account_id, to_account_id);`
+* **Paginación obligatoria:** Endpoints de listados de movimientos deberán usar paginación basada en cursor (`cursor-based pagination`) en lugar de `OFFSET/LIMIT` tradicional para evitar degradación de rendimiento a escala.
+
+### D. Idempotencia y Resiliencia
+* **Header de Idempotencia:** Para prevenir el registro duplicado de pagos o compras por pérdidas de conexión en dispositivos móviles, los endpoints `POST` deben aceptar el encabezado `Idempotency-Key: <UUID>`.
+* **Manejo de zonas horarias:** Los campos de fecha deben almacenarse obligatoriamente con desplazamiento de zona horaria (`TIMESTAMPTZ` o formato ISO 8601 UTC `YYYY-MM-DDTHH:MM:SSZ`).
+
+### E. Seguridad y Multitenancy
+* **Aislamiento estricto por usuario:** Todas las consultas SQL (`SELECT`, `UPDATE`, `DELETE`) deben incluir la condición explícita `WHERE user_id = :authenticated_user_id` para prevenir vulnerabilidades de referencia directa e insegura a objetos (IDOR).
+* **Autenticación en la API:** Se recomienda implementar **JWT (JSON Web Tokens)** mediante Bearer Tokens en encabezados HTTP o manejo de sesiones con tokens de renovación (*Refresh Tokens*).
+
+---
+
+## 4. Futuras Mejoras y Funcionalidades a Implementar
+
+A medida que el sistema evolucione de un core de registro transaccional hacia un ecosistema financiero integral, se sugieren las siguientes fases de desarrollo:
+
+### Fase 1: Automatización e Ingesta de Datos
+* **Parsing e Ingesta de Notificaciones SMS/Push:**
+  * Desarrollar un servicio en la app móvil que escuche notificaciones bancarias locales para pre-llenar transacciones automáticamente mediante Expresiones Regulares (Regex) o clasificadores livianos.
+* **Procesamiento de Recibos / OCR:**
+  * Agregar soporte para adjuntar imágenes de facturas y recibos (`POST /api/v1/transactions/ocr`) con extracción de texto mediante OCR para categorizar y extraer el monto de forma automática.
+* **Programación de Transacciones Recurrentes:**
+  * Módulo para suscripciones, arriendos o pagos de servicios que programe la creación automática de transacciones en fechas específicas o genere alertas de vencimiento (*CRON Jobs / Task Queues*).
+
+### Fase 2: Planificación Financiera Avanzada y Análisis
+* **Módulo de Presupuestación (Presupuesto Base Cero):**
+  * Creación de metas de gasto por categoría (`budgets`) con alertas al alcanzar el 80% o 100% del límite mensual.
+* **Proyecciones de Flujo de Caja (Cash Flow Forecasting):**
+  * Algoritmos predictivos basados en series de tiempo para proyectar saldos futuros considerando recurrencias e ingresos esperados.
+* **Simulador de Amortización de Deudas:**
+  * Motor de cálculo para amortización de préstamos y tarjetas de crédito con estrategias de pago optimizadas (*Método Bola de Nieve vs. Avalancha*).
+
+### Fase 3: Integraciones y Notificaciones Asíncronas
+* **Integración con Bots (Telegram / WhatsApp / Discord):**
+  * Exponer webhooks securizados para registrar ingresos y gastos mediante comandos rápidos o mensajes de voz procesados por NLP (ej. *"Gasté $15 en gasolina con tarjeta"*).
+* **Alertas y Notificaciones Push (WebSockets / FCM):**
+  * Notificaciones de sobregastos en presupuestos, vencimiento de tarjetas de crédito y reporte de resumen semanal/mensual automatizado.
